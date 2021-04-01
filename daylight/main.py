@@ -1,12 +1,8 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
-
-import os, datetime, time, signal
-import json, imghdr, threading,  pytz
-import schedule, atexit
-
-TODAY = datetime.date.today()
-TIME_ZONE = 'America/Toronto'
+import os, datetime, time, signal, math
+import imghdr, threading, pytz
+import schedule
 
 DIR_PATH = os.path.dirname(os.path.realpath(__file__))
 
@@ -14,50 +10,38 @@ import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('AppIndicator3', '0.1')
 
-from dateutil import tz
 from gi.repository import Gio as gio
 from gi.repository import Gtk as gtk
 from gi.repository import AppIndicator3 as appindicator
-from astral.sun import sun
-from astral.geocoder import database, lookup
 
-APPINDICATOR_ID = 'Fp0GWrO43i'
+from config import Config
 
-ENABLE_DEBUG = True
-ENABLE_AUTOMATIC = True
-ENABLE_WALLPAPER_CHANGE = True
-ENABLE_THEME_CHANGE = False
-
-SCHEDULED_JOBS = []
-
-scheduler_thread = None
-job_thread = None
-wallpaper_thread = None
-theme_thread = None
+INDICATOR = None
 
 def main():
-    global scheduler_thread
+    build_sun_info()
 
-    if ENABLE_DEBUG:
+    if Config.ENABLE_DEBUG:
         print('Starting main ...')
     
-    if ENABLE_AUTOMATIC:
+    if Config.ENABLE_AUTOMATIC:
+        do_automatic()
         # Schedule jobs to be executed
-        SCHEDULED_JOBS.append(schedule.every(60).seconds.do(set_automatic))
+        Config.SCHEDULED_JOBS.append(schedule.every(10).seconds.do(do_automatic))
         
-        if scheduler_thread is None:
-            if ENABLE_DEBUG:
+        if Config.SCH_THREAD is None:
+            if Config.ENABLE_DEBUG:
                 print('Enabling scheduler thread ...')
-            scheduler_thread = threading.Thread(target=run_scheduled_jobs)
-            scheduler_thread.start()
+            Config.SCH_THREAD = threading.Thread(target=run_scheduled_jobs)
+            Config.SCH_THREAD.start()
 
-    indicator = appindicator.Indicator.new(
-        APPINDICATOR_ID,
+    INDICATOR = appindicator.Indicator.new(
+        Config.APPINDICATOR_ID,
         f'{DIR_PATH}/icon.png',
         appindicator.IndicatorCategory.SYSTEM_SERVICES
     )
-    indicator.set_status(appindicator.IndicatorStatus.ACTIVE)
-    indicator.set_menu(build_menu())
+    INDICATOR.set_status(appindicator.IndicatorStatus.ACTIVE)
+    INDICATOR.set_menu(build_menu())
     
     gtk.main()
 
@@ -68,19 +52,24 @@ def build_menu():
 
     item_themes = gtk.ImageMenuItem(label='Theme Style')
 
-    item_dawn = gtk.MenuItem(label='Dawn')
+    dawn_label = f"Dawn - {Config.SUN_INFO['dawn']['local_str']}" if Config.ENABLE_AUTOMATIC else 'Dawn'
+    item_dawn = gtk.MenuItem(label=dawn_label)
     item_dawn.connect('activate', activate_dawn_wallpaper)
 
-    item_sun_rise = gtk.MenuItem(label='Sun Rise')
+    sunrise_label = f"Sun Rise - {Config.SUN_INFO['sunrise']['local_str']}" if Config.ENABLE_AUTOMATIC else 'Sun Rise'
+    item_sun_rise = gtk.MenuItem(label=sunrise_label)
     item_sun_rise.connect('activate', activate_sunrise_wallpaper)
 
-    item_noon = gtk.MenuItem(label='Noon')
+    noon_label = f"Noon - {Config.SUN_INFO['noon']['local_str']}" if Config.ENABLE_AUTOMATIC else 'Noon'
+    item_noon = gtk.MenuItem(label=noon_label)
     item_noon.connect('activate', activate_noon_wallpaper)
 
-    item_sun_set = gtk.MenuItem(label='Sun Set')
+    sunset_label = f"Sun Set - {Config.SUN_INFO['sunset']['local_str']}" if Config.ENABLE_AUTOMATIC else 'Sun Set'
+    item_sun_set = gtk.MenuItem(label=sunset_label)
     item_sun_set.connect('activate', activate_sunset_wallpaper)
 
-    item_dusk = gtk.MenuItem(label='Dusk')
+    dusk_label = f"Dusk - {Config.SUN_INFO['dusk']['local_str']}" if Config.ENABLE_AUTOMATIC else 'Dusk'
+    item_dusk = gtk.MenuItem(label=dusk_label)
     item_dusk.connect('activate', activate_dusk_wallpaper)
 
     item_quit = gtk.MenuItem(label='Quit')
@@ -106,20 +95,18 @@ def build_menu():
     return menu
 
 def run_scheduled_jobs():
-    global job_thread
-
-    while len(SCHEDULED_JOBS) > 0:
-        if ENABLE_AUTOMATIC and job_thread is None:
-            if ENABLE_DEBUG:
+    while len(Config.SCHEDULED_JOBS) > 0:
+        if Config.ENABLE_AUTOMATIC and Config.JOB_THREAD is None:
+            if Config.ENABLE_DEBUG:
                 print('Enabling job thread ...')
-            job_thread = threading.Thread(target=schedule.run_pending())
-            job_thread.start()
+            Config.JOB_THREAD = threading.Thread(target=schedule.run_pending())
+            Config.JOB_THREAD.start()
         
-        if job_thread != None:
-            job_thread.join() # Wait for job thread to finish
-            if ENABLE_DEBUG:
+        if Config.JOB_THREAD != None:
+            Config.JOB_THREAD.join() # Wait for job thread to finish
+            if Config.ENABLE_DEBUG:
                 print('Disable job thread ...')
-            job_thread = None
+            Config.JOB_THREAD = None
         
         # Disable the enabling of the job thread for x seconds
         #<--@todo: Fix this will cause the x seconds wait upon quit...
@@ -128,6 +115,7 @@ def run_scheduled_jobs():
 
 def activate_dawn_wallpaper(source=''):
     uri = f'{DIR_PATH}/screen'
+
     for i in os.listdir(uri):
         if 'dawn' in i:
             uri = f'{uri}/{i}'
@@ -172,12 +160,12 @@ def activate_dusk_wallpaper(source=''):
     apply_changes(uri, 'Yaru-dark')
 
 def activate_quit(source=''):
-    if ENABLE_DEBUG:
+    if Config.ENABLE_DEBUG:
         print('Quitting ...')      
    
-    for job in SCHEDULED_JOBS:
+    for job in Config.SCHEDULED_JOBS:
         schedule.cancel_job(job)
-        SCHEDULED_JOBS.remove(job)
+        Config.SCHEDULED_JOBS.remove(job)
     
     # Clear all jobs
     schedule.clear()
@@ -185,120 +173,115 @@ def activate_quit(source=''):
     # Before quitting wait for threads in progress to end
     wait_for_threads()
 
-    if ENABLE_DEBUG:
+    if Config.ENABLE_DEBUG:
         print (f'\
-            Jobs: {SCHEDULED_JOBS}\n\
+            Jobs: {Config.SCHEDULED_JOBS}\n\
             #of Threads: {threading.active_count()}\n\
-            Scheduler Thread: {scheduler_thread}\n\
-            Job Thread: {job_thread}\n\
-            Wallpaper Thread: {wallpaper_thread}\n\
-            Theme Thread: {theme_thread}\n\
+            Scheduler Thread: {Config.SCH_THREAD}\n\
+            Job Thread: {Config.JOB_THREAD}\n\
+            Wallpaper Thread: {Config.WALLPAPER_THREAD}\n\
+            Theme Thread: {Config.THEME_THREAD}\n\
         ')
     gtk.main_quit()
     print ("[App] Closed gracefully.")
 
-def is_image(uri):
-    return imghdr.what(uri)
+def set_automatic(seq):
+    if seq is None or seq < 0: return
 
-def set_automatic():
-    now_utc = datetime.datetime.utcnow().replace(tzinfo=pytz.UTC)
-    now_local = now_utc.astimezone(tz.gettz(TIME_ZONE))
-    sun_info = sun(
-        lookup('Toronto', database()).observer,
-        date=datetime.date(TODAY.year, TODAY.month, TODAY.day)
-    )
+    uri = f'{DIR_PATH}/screen'
+    for file_name in os.listdir(uri):
+        if str(seq) == os.path.splitext(file_name)[0]:
+            uri = f'{uri}/{file_name}'
+            break
     
-    for val in sun_info:
-        sun_info[val] = {
-            'utc': sun_info[val],
-            'local': sun_info[val].replace(tzinfo=pytz.UTC).astimezone(tz.gettz(TIME_ZONE))
-        }
+    print(uri)
+    apply_changes(uri, 'Yaru-dark')
+
+def do_automatic():
+    global Config.SUN_INFO
+
+    if not Config.SUN_INFO:
+        if Config.ENABLE_DEBUG:
+            print ("Invalid sun info...")
+        return 
+
+    # now_utc = datetime.datetime.utcnow().replace(tzinfo=pytz.UTC)
+    # now_local = now_utc.astimezone(tz.gettz(TIME_ZONE))
+
+    global local_time
+    now_local = local_time.astimezone(tz.gettz(TIME_ZONE))
+    print(now_local)
+    print(Config.SUN_INFO['dawn']['local'], now_local >= Config.SUN_INFO['dawn']['local'])
+
+    seq = -1
     
-    if now_local >= sun_info['dusk']['local']:
-        activate_dusk_wallpaper()
-    elif now_local >= sun_info['sunset']['local']:
-        activate_sunset_wallpaper()
-    elif now_local >= sun_info['noon']['local']:
-        activate_noon_wallpaper()
-    elif now_local >= sun_info['sunrise']['local']:
-        activate_sunrise_wallpaper()
-    elif now_local >= sun_info['dawn']['local']:
-        activate_dawn_wallpaper()
-
-def get_wallpaper_uri():
-    settings = gio.Settings.new('org.gnome.desktop.background')
-    return settings.get_string('picture-uri')
-
-def set_wallpaper(uri):
-    if not uri.startswith('/'):
-        return 'invalid resource location...'
-
-    if not is_image(uri):
-        return 'not a valid image...'
-
-    settings = gio.Settings.new('org.gnome.desktop.background')
-    settings.set_string('picture-uri', f'file://{uri}')
+    def calculate_seq(moveTo, moveFrom):
+        diff = Config.SUN_INFO[moveTo]['local'] - Config.SUN_INFO[moveFrom]['local']
+        avg = diff / len(Config.SUN_WALLPAPER_SEQ[moveFrom])
+        seq_val = math.floor(len(Config.SUN_WALLPAPER_SEQ[moveFrom]) - ((Config.SUN_INFO[moveTo]['local'] - now_local) / avg))
+        print(moveTo, moveFrom, seq_val)
+        return seq_val
     
-    return get_wallpaper_uri() == uri
-
-def get_theme():
-    settings = gio.Settings.new('org.gnome.desktop.interface')
-    return settings.get_string('gtk-theme')
-
-def set_theme(name):
-    if not name and (name != 'Yaru' or name != 'Yaru-light' or name != 'Yaru-dark'):
-        return 'invalid theme...'
+    if now_local >= Config.SUN_INFO['dusk']['local']:
+        pass
+    elif now_local >= Config.SUN_INFO['sunset']['local']:
+        seq = calculate_seq('dusk', 'sunset')
+    elif now_local >= Config.SUN_INFO['noon']['local']:
+        seq = calculate_seq('sunset', 'noon')
+    elif now_local >= Config.SUN_INFO['sunrise']['local']:
+        seq = calculate_seq('noon', 'sunrise')
+    elif now_local >= Config.SUN_INFO['dawn']['local']:
+        seq = calculate_seq('sunrise', 'dawn')
     
-    settings = gio.Settings.new('org.gnome.desktop.interface')
-    settings.set_string('gtk-theme', name)
-    return get_theme() == name
+    set_automatic(seq)
+    local_time = datetime.timedelta(minutes=30)
 
 def apply_changes(uri, theme_name):
-    global wallpaper_thread, theme_thread
-    if ENABLE_WALLPAPER_CHANGE and wallpaper_thread is None:
-        if ENABLE_DEBUG:
+    global Config.WALLPAPER_THREAD, Config.THEME_THREAD
+    if Config.ENABLE_WALLPAPER_CHANGE and Config.WALLPAPER_THREAD is None:
+        if Config.ENABLE_DEBUG:
             print('Enabling wallpaper thread ...')
-        wallpaper_thread = threading.Thread(target=set_wallpaper, args=[uri])
-        wallpaper_thread.start()
+        Config.WALLPAPER_THREAD = threading.Thread(target=set_wallpaper, args=[uri])
+        Config.WALLPAPER_THREAD.start()
     
-    if ENABLE_THEME_CHANGE and theme_thread is None:
-        if ENABLE_DEBUG:
+    if Config.ENABLE_THEME_CHANGE and Config.THEME_THREAD is None:
+        if Config.ENABLE_DEBUG:
             print('Enabling theme thread ...')
-        theme_thread = threading.Thread(target=set_theme, args=[theme_name])
-        theme_thread.start()
+        Config.THEME_THREAD = threading.Thread(target=set_theme, args=[theme_name])
+        Config.THEME_THREAD.start()
     
     #<--@todo: Change this to a callback so we don't halt process
-    if wallpaper_thread != None:
-        if wallpaper_thread.is_alive():
-            wallpaper_thread.join()
-    if theme_thread != None:
-        if theme_thread.is_alive():
-            theme_thread.join()
+    if Config.WALLPAPER_THREAD != None:
+        if Config.WALLPAPER_THREAD.is_alive():
+            Config.WALLPAPER_THREAD.join()
+    if Config.THEME_THREAD != None:
+        if Config.THEME_THREAD.is_alive():
+            Config.THEME_THREAD.join()
     #-->
-    if ENABLE_DEBUG:
+    if Config.ENABLE_DEBUG:
         print('Disable Wallpaper and Theme thread ...')
     
-    wallpaper_thread = None
-    theme_thread = None
+    Config.WALLPAPER_THREAD = None
+    Config.THEME_THREAD = None
 
 def wait_for_threads():
-    global scheduler_thread, job_thread, wallpaper_thread, theme_thread
+    global Config.SCH_THREAD, Config.JOB_THREAD, Config.WALLPAPER_THREAD, Config.THEME_THREAD
 
-    if scheduler_thread != None:
-        scheduler_thread.join()
-        scheduler_thread = None
+    if Config.SCH_THREAD != None:
+        Config.SCH_THREAD.join()
+        Config.SCH_THREAD = None
     
-    if job_thread != None:
-        job_thread.join()
-        job_thread = None
+    if Config.JOB_THREAD != None:
+        Config.JOB_THREAD.join()
+        Config.JOB_THREAD = None
     
-    if wallpaper_thread != None:
-        wallpaper_thread.join()
-        wallpaper_thread = None
+    if Config.WALLPAPER_THREAD != None:
+        Config.WALLPAPER_THREAD.join()
+        Config.WALLPAPER_THREAD = None
     
-    if theme_thread != None:
-        theme_thread.join()
-        theme_thread = None
+    if Config.THEME_THREAD != None:
+        Config.THEME_THREAD.join()
+        Config.THEME_THREAD = None
 
 if __name__ == '__main__':
     main()
