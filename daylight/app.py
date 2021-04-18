@@ -93,12 +93,24 @@ class App:
     '''        
     def __job_thread(self):
         while not self.threading_event.isSet():
+            if (self.screen_watcher.has_day_changed()):
+                if App.ENABLE_DEBUG:
+                    print (f'[{self.identify}] Day changed, re-initializing ScreenWatcher...')
+                
+                self.sun = Sun()
+                self.sun_info = self.sun.make()
+                self.time_zone = self.sun.get_time_zone()
+
+                self.screen_watcher = ScreenWatcher(self.sun_info, self.time_zone)
+            
             # Setting up the screen watcher
-            self.screen_watcher.run_scheduled_jobs()
-            timeout = self.screen_watcher.next_scheduled_job()
+            self.screen_watcher.set_curr_wallpaper()
+            
+            # timeout = self.screen_watcher.next_scheduled_job()
+            timeout = 30
 
             if App.ENABLE_DEBUG:
-                print (f'[{self.identify}] waiting for next job in {timeout} seconds...')
+                print (f'[{self.identify}] waiting for {timeout} seconds...')
             
             event_is_set = self.threading_event.wait(timeout)
             if (event_is_set and App.ENABLE_DEBUG):
